@@ -231,7 +231,8 @@ func main() {
 				if noFilter || cliOptions.SmtpOnly {
 					builder.WriteString(fmt.Sprintf("[%s] Received SMTP interaction from %s at %s", interaction.FullId, interaction.RemoteAddress, interaction.Timestamp.Format("2006-01-02 15:04:05")))
 					if cliOptions.Verbose {
-						builder.WriteString(fmt.Sprintf("\n------------\nSMTP Interaction\n------------\n\n%s\n\n", interaction.RawRequest))
+						builder.WriteString(fmt.Sprintf("\n------------\nSMTP Protocol\n------------\n\n%s\n\n", interaction.RawResponse))
+						builder.WriteString(fmt.Sprintf("------------\nEmail Message\n------------\n\n%s\n\n", interaction.RawRequest))
 					}
 					writeOutput(outputFile, builder)
 				}
