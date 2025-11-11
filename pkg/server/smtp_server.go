@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,17 +16,41 @@ import (
 	stringsutil "github.com/projectdiscovery/utils/strings"
 )
 
+// smtpConversation holds the protocol conversation lines for a single SMTP connection
+type smtpConversation struct {
+	lines []string
+	mu    sync.Mutex
+}
+
 // SMTPServer is a smtp server instance that listens both
 // TLS and Non-TLS based servers.
 type SMTPServer struct {
 	options     *Options
 	smtpServer  smtpd.Server
 	smtpsServer smtpd.Server
+	// NOTE: This is susceptable to race condition on multiple requests coming from the same
+	// remote address. I.e., the SMTP streams may get mixed. I found no way besides changing
+	// smtpd to fix this.
+	conversationMap sync.Map // keyed by remote address
+}
+
+// createLogHandler returns a LogFunc that captures SMTP protocol lines (both client and server)
+func (h *SMTPServer) createLogHandler() smtpd.LogFunc {
+	return func(remoteIP, verb, line string) {
+		conv, _ := h.conversationMap.LoadOrStore(remoteIP, &smtpConversation{})
+		c := conv.(*smtpConversation)
+		c.mu.Lock()
+		c.lines = append(c.lines, line)
+		c.mu.Unlock()
+	}
 }
 
 // NewSMTPServer returns a new TLS & Non-TLS SMTP server.
 func NewSMTPServer(options *Options) (*SMTPServer, error) {
 	server := &SMTPServer{options: options}
+
+	// Enable debug mode in smtpd library to activate LogRead/LogWrite callbacks
+	smtpd.Debug = true
 
 	authHandler := func(remoteAddr net.Addr, mechanism string, username []byte, password []byte, shared []byte) (bool, error) {
 		return true, nil
@@ -33,6 +58,9 @@ func NewSMTPServer(options *Options) (*SMTPServer, error) {
 	rcptHandler := func(remoteAddr net.Addr, from string, to string) bool {
 		return true
 	}
+
+	logHandler := server.createLogHandler()
+
 	server.smtpServer = smtpd.Server{
 		Addr:        fmt.Sprintf("%s:%d", options.ListenIP, options.SmtpPort),
 		AuthHandler: authHandler,
@@ -40,6 +68,8 @@ func NewSMTPServer(options *Options) (*SMTPServer, error) {
 		Hostname:    options.Domains[0],
 		Appname:     "interactsh",
 		Handler:     smtpd.Handler(server.defaultHandler),
+		LogRead:     logHandler,
+		LogWrite:    logHandler,
 	}
 	server.smtpsServer = smtpd.Server{
 		Addr:        fmt.Sprintf("%s:%d", options.ListenIP, options.SmtpsPort),
@@ -48,6 +78,8 @@ func NewSMTPServer(options *Options) (*SMTPServer, error) {
 		Hostname:    options.Domains[0],
 		Appname:     "interactsh",
 		Handler:     smtpd.Handler(server.defaultHandler),
+		LogRead:     logHandler,
+		LogWrite:    logHandler,
 	}
 	return server, nil
 }
@@ -58,8 +90,18 @@ func (h *SMTPServer) ListenAndServe(tlsConfig *tls.Config, smtpAlive, smtpsAlive
 		if tlsConfig == nil {
 			return
 		}
-		srv := &smtpd.Server{Addr: fmt.Sprintf("%s:%d", h.options.ListenIP, h.options.SmtpAutoTLSPort), Handler: h.defaultHandler, Appname: "interactsh", Hostname: h.options.Domains[0]}
-		srv.TLSConfig = tlsConfig
+
+		logHandler := h.createLogHandler()
+
+		srv := &smtpd.Server{
+			Addr:      fmt.Sprintf("%s:%d", h.options.ListenIP, h.options.SmtpAutoTLSPort),
+			Handler:   h.defaultHandler,
+			Appname:   "interactsh",
+			Hostname:  h.options.Domains[0],
+			LogRead:   logHandler,
+			LogWrite:  logHandler,
+			TLSConfig: tlsConfig,
+		}
 
 		smtpsAlive <- true
 		err := srv.ListenAndServe()
@@ -91,19 +133,31 @@ func (h *SMTPServer) defaultHandler(remoteAddr net.Addr, from string, to []strin
 	dataString := string(data)
 	gologger.Debug().Msgf("New SMTP request: %s %s %s %s\n", remoteAddr, from, to, dataString)
 
+	// Retrieve and format the full SMTP protocol conversation
+	host, _, _ := net.SplitHostPort(remoteAddr.String())
+	var protocolConversation string
+	if conv, ok := h.conversationMap.Load(host); ok {
+		c := conv.(*smtpConversation)
+		c.mu.Lock()
+		protocolConversation = strings.Join(c.lines, "\n")
+		c.mu.Unlock()
+		// Clean up immediately to prevent stale data in subsequent connections from same IP
+		h.conversationMap.Delete(host)
+	}
+
 	// if root-tld is enabled stores any interaction towards the main domain
 	for _, addr := range to {
 		if h.options.RootTLD {
 			for _, domain := range h.options.Domains {
 				if stringsutil.HasSuffixI(addr, domain) {
 					ID := domain
-					host, _, _ := net.SplitHostPort(remoteAddr.String())
 					address := addr[strings.LastIndex(addr, "@"):]
 					interaction := &Interaction{
 						Protocol:      "smtp",
 						UniqueID:      address,
 						FullId:        address,
 						RawRequest:    dataString,
+						RawResponse:   protocolConversation,
 						SMTPFrom:      from,
 						RemoteAddress: host,
 						Timestamp:     time.Now(),
@@ -137,14 +191,13 @@ func (h *SMTPServer) defaultHandler(remoteAddr net.Addr, from string, to []strin
 		}
 	}
 	if uniqueID != "" {
-		host, _, _ := net.SplitHostPort(remoteAddr.String())
-
 		correlationID := uniqueID[:h.options.CorrelationIdLength]
 		interaction := &Interaction{
 			Protocol:      "smtp",
 			UniqueID:      uniqueID,
 			FullId:        fullID,
 			RawRequest:    dataString,
+			RawResponse:   protocolConversation,
 			SMTPFrom:      from,
 			RemoteAddress: host,
 			Timestamp:     time.Now(),
