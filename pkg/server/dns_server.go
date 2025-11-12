@@ -260,6 +260,16 @@ func (h *DNSServer) handleTXT(zone string, m *dns.Msg) {
 		return
 	}
 
+	// Check if a CNAME record exists for this zone (per RFC 1034)
+	// If a CNAME exists, return it instead of TXT
+	cnameRecords := h.customRecords.checkCustomResponse(zone, dns.TypeCNAME)
+	if len(cnameRecords) > 0 {
+		for _, record := range cnameRecords {
+			h.addCustomRecordToMessage(record, zone, m)
+		}
+		return
+	}
+
 	// Fall back to default TXT record
 	m.Answer = append(m.Answer, &dns.TXT{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 0}, Txt: []string{h.TxtRecord}})
 }
