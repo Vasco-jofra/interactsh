@@ -80,6 +80,11 @@ func (h *DNSServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	m.SetReply(r)
 	m.Authoritative = true
 
+	// Handle EDNS if present in the request
+	if opt := r.IsEdns0(); opt != nil {
+		m.SetEdns0(4096, false)
+	}
+
 	// bail early for no queries.
 	if len(r.Question) == 0 {
 		return
