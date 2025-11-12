@@ -243,7 +243,7 @@ func (h *DNSServer) handleSOA(zone string, m *dns.Msg) {
 	for _, dotDomain := range dotDomains {
 		if nsDomains, ok := h.nsDomains[dotDomain]; ok {
 			for _, nsDomain := range nsDomains {
-				m.Answer = append(m.Answer, &dns.SOA{Hdr: nsHdr, Ns: nsDomain, Mbox: acme.CertificateAuthority, Serial: 1, Expire: 60, Minttl: 60})
+				m.Answer = append(m.Answer, &dns.SOA{Hdr: nsHdr, Ns: nsDomain, Mbox: acme.CertificateAuthority, Serial: 1, Refresh: 3600, Retry: 600, Expire: 60, Minttl: 60})
 				return
 			}
 		}
